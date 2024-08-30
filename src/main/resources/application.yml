@@ -1,0 +1,7 @@
+sandbox:
+  config:
+    cpu-count: 1
+    memory-limit: 268435456
+    timeout-limit: 2
+    time-unit: seconds
+    memory-swap: 0
