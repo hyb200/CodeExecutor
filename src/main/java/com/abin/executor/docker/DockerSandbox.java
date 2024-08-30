@@ -1,6 +1,8 @@
 package com.abin.executor.docker;
 
 import cn.hutool.core.io.FileUtil;
+import com.abin.executor.domain.ExecuteResp;
+import com.abin.executor.domain.enums.ExecStatusEnums;
 import com.abin.executor.domain.enums.LanguageEnums;
 import com.abin.executor.uitls.CommonUtils;
 import com.github.dockerjava.api.DockerClient;
@@ -39,10 +41,6 @@ public class DockerSandbox {
 
     private long memorySwap = 0L;
 
-    private long timeoutLimit = 1L;
-
-    private TimeUnit timeUnit = TimeUnit.SECONDS;
-
     private final DockerClientConfig dockerClientConfig = DefaultDockerClientConfig.createDefaultConfigBuilder()
             .withDockerHost(dockerHost)
             .withDockerTlsVerify(false)
@@ -57,35 +55,18 @@ public class DockerSandbox {
 
     private final DockerClient dockerClient = DockerClientImpl.getInstance(dockerClientConfig, httpClient);
 
-    public void execCmd(String containerId, String[] cmd) {
+    public ExecuteResp execCmd(String containerId, String[] cmd, long timeoutLimit, TimeUnit timeUnit) {
         StatsCmd statsCmd = dockerClient.statsCmd(containerId);
-        statsCmd.exec(new ResultCallback<Statistics>() {
+
+        final long[] memoryUsage = new long[1];
+        final long[] timeRecord = new long[2];
+
+        ResultCallback<Statistics> statisticsResultCallback = new ResultCallback.Adapter<Statistics>() {
             @Override
-            public void onStart(Closeable closeable) {
-
+            public void onNext(Statistics statistics) {
+                memoryUsage[0] = Math.max(memoryUsage[0], statistics.getMemoryStats().getUsage());
             }
-
-            @Override
-            public void onNext(Statistics object) {
-                MemoryStatsConfig memoryStats = object.getMemoryStats();
-
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-
-            }
-
-            @Override
-            public void onComplete() {
-
-            }
-
-            @Override
-            public void close() throws IOException {
-
-            }
-        });
+        };
 
         ExecCreateCmdResponse createCmdResponse = dockerClient.execCreateCmd(containerId)
                 .withCmd(cmd)
@@ -95,20 +76,19 @@ public class DockerSandbox {
                 .exec();
 
         final boolean[] result = {true};
-        final boolean[] timeout = {true};
+
+        ExecuteResp executeResp = new ExecuteResp();
+        executeResp.setExecStatusCode(ExecStatusEnums.SUCCESS.getCode());
+        executeResp.setExecResult(ExecStatusEnums.SUCCESS.getDesc());
 
         try (ByteArrayOutputStream out = new ByteArrayOutputStream();
              ByteArrayOutputStream err = new ByteArrayOutputStream();
              ResultCallback.Adapter<Frame> frameAdapter = new ResultCallback.Adapter<Frame>() {
                  @Override
                  public void onStart(Closeable stream) {
+                     statsCmd.exec(statisticsResultCallback);
+                     timeRecord[0] = System.currentTimeMillis();
                      super.onStart(stream);
-                 }
-
-                 @Override
-                 public void onComplete() {
-                     timeout[0] = false;
-                     super.onComplete();
                  }
 
                  @SneakyThrows
@@ -131,14 +111,36 @@ public class DockerSandbox {
                  }
              }) {
             dockerClient.execStartCmd(createCmdResponse.getId()).exec(frameAdapter).awaitCompletion(timeoutLimit, timeUnit);
-            System.out.println("===== errMsg =====");
-            System.out.print(err);
-            System.out.println("===== output =====");
-            System.out.print(out);
-            System.out.println("===== end =====");
+            timeRecord[1] = System.currentTimeMillis();
+
+            executeResp.setErrMsg(err.toString());
+            executeResp.setOutput(out.toString());
+
+            if (err.size() != 0) {
+                executeResp.setExecStatusCode(ExecStatusEnums.COMMON_ERROR.getCode());
+                executeResp.setExecResult(ExecStatusEnums.COMMON_ERROR.getDesc());
+                return executeResp;
+            }
+
+            long timeUsage = timeRecord[1] - timeRecord[0];
+            if (timeUsage > timeoutLimit) {
+                executeResp.setExecStatusCode(ExecStatusEnums.TIME_LIMIT_EXCEEDED.getCode());
+                executeResp.setExecResult(ExecStatusEnums.TIME_LIMIT_EXCEEDED.getDesc());
+                return executeResp;
+            }
+
+            if (memoryUsage[0] > memoryLimit) {
+                executeResp.setExecStatusCode(ExecStatusEnums.MEMORY_LIMIT_EXCEEDED.getCode());
+                executeResp.setExecResult(ExecStatusEnums.MEMORY_LIMIT_EXCEEDED.getDesc());
+                return executeResp;
+            }
+
+            executeResp.setTimeUsage(timeUsage);
+            executeResp.setMemoryUsage(memoryUsage[0]);
         } catch (Exception e) {
             log.error(e.getMessage());
         }
+        return executeResp;
     }
 
     public String createContainer(String codePath) {
@@ -188,13 +190,13 @@ public class DockerSandbox {
 
         String javaCode = "public class Main {\n" +
                 "    public static void main(String[] args) {\n" +
-                "           byte[] bytes = new byte[268435457];" +
+                "           System.out.print(\"success\");" +
                 "    }\n" +
                 "}";
-        String codePath = CommonUtils.saveCode("java", javaCode);
-        System.out.println(FileUtil.getParent(codePath, 1));
+        String codePath = CommonUtils.saveCode("cpp", cppCode);
         String containerId = sandbox.createContainer(codePath);
-        sandbox.execCmd(containerId, LanguageEnums.JAVA.getCompileCmd());
-        sandbox.execCmd(containerId, LanguageEnums.JAVA.getExecCmd());
+        System.out.println(sandbox.execCmd(containerId, LanguageEnums.CPP.getCompileCmd(), 10000L, TimeUnit.MILLISECONDS));
+        System.out.println(sandbox.execCmd(containerId, LanguageEnums.CPP.getExecCmd(), 1000L, TimeUnit.MILLISECONDS));
+        CommonUtils.deleteFile(codePath);
     }
 }

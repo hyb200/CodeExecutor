@@ -31,4 +31,13 @@ public class ExecuteResp {
      */
     private String output;
 
+    /**
+     * 时间消耗
+     */
+    private Long timeUsage;
+
+    /**
+     * 内存消耗
+     */
+    private Long memoryUsage;
 }

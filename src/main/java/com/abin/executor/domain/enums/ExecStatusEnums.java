@@ -11,11 +11,12 @@ import java.util.stream.Collectors;
 @AllArgsConstructor
 @Getter
 public enum ExecStatusEnums {
-    SUCCESS(0, "通过"),
-    COMPILE_ERROR(1, "编译错误"),
-    TIME_LIMIT_EXCEEDED(2, "超出时间限制"),
-    MEMORY_LIMIT_EXCEEDED(2, "超出内存限制"),
-    RUNTIME_ERROR(3, "执行错误")
+    SUCCESS(0, "成功"),
+    COMMON_ERROR(1, "错误"),
+    COMPILE_ERROR(2, "编译错误"),
+    TIME_LIMIT_EXCEEDED(3, "超出时间限制"),
+    MEMORY_LIMIT_EXCEEDED(4, "超出内存限制"),
+    RUNTIME_ERROR(5, "执行错误")
     ;
     private final Integer code;
     private final String desc;
