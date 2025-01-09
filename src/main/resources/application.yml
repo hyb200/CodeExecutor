@@ -5,3 +5,4 @@ sandbox:
     timeout-limit: 2
     time-unit: seconds
     memory-swap: 0
+    image: compiler:1.0

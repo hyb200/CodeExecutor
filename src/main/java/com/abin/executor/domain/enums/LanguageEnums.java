@@ -21,7 +21,7 @@ public enum LanguageEnums {
             new String[]{"./main"}),
     JAVA("java",
             "Main.java",
-            new String[]{"javac", "-cp", "/box", "-encoding", "utf-8", "Main.java"},
+            new String[]{"javac", "-cp", "/workspace", "-encoding", "utf-8", "Main.java"},
             new String[]{"java", "-Dfile.encoding=UTF-8", "Main"}),
     PYTHON3("python",
             "main.py",
@@ -37,8 +37,8 @@ public enum LanguageEnums {
             new String[]{"node", "main.ts"}),
     GO("go",
             "main.go",
-            null,
-            new String[]{"go", "run", "main.go"}),
+            new String[]{"go", "build", "main.go"},
+            new String[]{"./main"}),
     ;
     private final String language;
 

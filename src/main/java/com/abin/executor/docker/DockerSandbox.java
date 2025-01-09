@@ -1,29 +1,35 @@
 package com.abin.executor.docker;
 
-import cn.hutool.core.io.FileUtil;
+import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+
+import lombok.Data;
+import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
+
 import com.abin.executor.domain.ExecuteResp;
 import com.abin.executor.domain.enums.ExecStatusEnums;
-import com.abin.executor.domain.enums.LanguageEnums;
-import com.abin.executor.uitls.CommonUtils;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.StatsCmd;
-import com.github.dockerjava.api.model.*;
+import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.Statistics;
+import com.github.dockerjava.api.model.StreamType;
+import com.github.dockerjava.api.model.Volume;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientConfig;
 import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import com.github.dockerjava.transport.DockerHttpClient;
-import lombok.Data;
-import lombok.SneakyThrows;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.context.annotation.Configuration;
-
-import java.io.*;
-import java.time.Duration;
-import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Data
@@ -31,23 +37,26 @@ import java.util.concurrent.TimeUnit;
 @ConfigurationProperties(prefix = "sandbox.config")
 public class DockerSandbox {
 
-    private String dockerHost = "tcp://192.168.25.128:2375";
+    private static final String DEFAULT_DOCKER_HOST = "unix:///var/run/docker.sock";
 
-    private String image = "sandbox:v1.0";
+    public static final String REMOTE_PATH = "/workspace";
 
-    private long memoryLimit = 1024 * 1024 * 256L;
+    private String dockerHost;
+
+    private String image = "compiler:1.0";
+
+    private long memoryLimit = 1024 * 1024 * 256;
 
     private long cpuCount = 1L;
 
     private long memorySwap = 0L;
 
     private final DockerClientConfig dockerClientConfig = DefaultDockerClientConfig.createDefaultConfigBuilder()
-            .withDockerHost(dockerHost)
+            .withDockerHost(dockerHost == null ? DEFAULT_DOCKER_HOST : dockerHost)
             .withDockerTlsVerify(false)
             .build();
 
-    private final DockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
-            .dockerHost(dockerClientConfig.getDockerHost())
+    private final DockerHttpClient httpClient = new ApacheDockerHttpClient.Builder().dockerHost(dockerClientConfig.getDockerHost())
             .maxConnections(100)
             .connectionTimeout(Duration.ofSeconds(30))
             .responseTimeout(Duration.ofSeconds(45))
@@ -61,13 +70,6 @@ public class DockerSandbox {
         final long[] memoryUsage = new long[1];
         final long[] timeRecord = new long[2];
 
-        ResultCallback<Statistics> statisticsResultCallback = new ResultCallback.Adapter<Statistics>() {
-            @Override
-            public void onNext(Statistics statistics) {
-                memoryUsage[0] = Math.max(memoryUsage[0], statistics.getMemoryStats().getUsage());
-            }
-        };
-
         ExecCreateCmdResponse createCmdResponse = dockerClient.execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdin(true)
@@ -75,41 +77,48 @@ public class DockerSandbox {
                 .withAttachStderr(true)
                 .exec();
 
-        final boolean[] result = {true};
+        final boolean[] result = { true };
 
         ExecuteResp executeResp = new ExecuteResp();
         executeResp.setExecStatusCode(ExecStatusEnums.SUCCESS.getCode());
         executeResp.setExecResult(ExecStatusEnums.SUCCESS.getDesc());
 
         try (ByteArrayOutputStream out = new ByteArrayOutputStream();
-             ByteArrayOutputStream err = new ByteArrayOutputStream();
-             ResultCallback.Adapter<Frame> frameAdapter = new ResultCallback.Adapter<Frame>() {
-                 @Override
-                 public void onStart(Closeable stream) {
-                     statsCmd.exec(statisticsResultCallback);
-                     timeRecord[0] = System.currentTimeMillis();
-                     super.onStart(stream);
-                 }
+            ByteArrayOutputStream err = new ByteArrayOutputStream();
+            ResultCallback<Statistics> statisticsResultCallback = new ResultCallback.Adapter<Statistics>() {
+                @Override
+                public void onNext(Statistics statistics) {
+                    memoryUsage[0] = Math.max(memoryUsage[0], statistics.getMemoryStats().getUsage());
+                }
+            };
+            ResultCallback.Adapter<Frame> frameAdapter = new ResultCallback.Adapter<Frame>() {
 
-                 @SneakyThrows
-                 @Override
-                 public void onNext(Frame frame) {
-                     StreamType streamType = frame.getStreamType();
-                     if (streamType.equals(StreamType.STDERR)) {
-                         result[0] = false;
-                         err.write(frame.getPayload());
-                     } else {
-                         out.write(frame.getPayload());
-                     }
-                     super.onNext(frame);
-                 }
+                @Override
+                public void onStart(Closeable stream) {
+                    statsCmd.exec(statisticsResultCallback);
+                    timeRecord[0] = System.currentTimeMillis();
+                    super.onStart(stream);
+                }
 
-                 @Override
-                 public void close() throws IOException {
-                     statsCmd.close();
-                     super.close();
-                 }
-             }) {
+                @SneakyThrows
+                @Override
+                public void onNext(Frame frame) {
+                    StreamType streamType = frame.getStreamType();
+                    if (streamType.equals(StreamType.STDERR)) {
+                        result[0] = false;
+                        err.write(frame.getPayload());
+                    } else {
+                        out.write(frame.getPayload());
+                    }
+                    super.onNext(frame);
+                }
+
+                @Override
+                public void close() throws IOException {
+                    statsCmd.close();
+                    super.close();
+                }
+            }) {
             dockerClient.execStartCmd(createCmdResponse.getId()).exec(frameAdapter).awaitCompletion(timeoutLimit, timeUnit);
             timeRecord[1] = System.currentTimeMillis();
 
@@ -144,59 +153,57 @@ public class DockerSandbox {
     }
 
     public String createContainer(String codePath) {
-        String image = "sandbox:v1.0";
         HostConfig hostConfig = new HostConfig();
+        hostConfig.setBinds(new Bind("/Users/abin/pjs/CodeExecutor/code", new Volume(REMOTE_PATH)));
         hostConfig.withMemorySwap(memorySwap);
         hostConfig.withMemory(memoryLimit);
         hostConfig.withCpuCount(cpuCount);
 
-        String containerId = dockerClient.createContainerCmd(image)
-                .withHostConfig(hostConfig)
-//                .withName("111") //  设置容器名
+        String containerId = dockerClient.createContainerCmd(image).withHostConfig(hostConfig)
+                //                .withName("111") //  设置容器名
                 .withNetworkDisabled(true)  //  关闭网络
-                .withAttachStdin(true)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .withTty(true)
-                .exec()
-                .getId();
+                .withAttachStdin(true).withAttachStdout(true).withAttachStderr(true)
+                .withTty(true).exec().getId();
 
-        //  启动容器
         dockerClient.startContainerCmd(containerId).exec();
-
-        //  复制文件
-        dockerClient.copyArchiveToContainerCmd(containerId)
-                .withHostResource(codePath)
-                .withRemotePath("/box")
-                .exec();
-
         return containerId;
     }
 
-
-
     public static void main(String[] args) {
-        DockerSandbox sandbox = new DockerSandbox();
-        String cppCode = "#include <iostream>\n" +
-                "\n" +
-                "using namespace std;\n" +
-                "\n" +
-                "int main()\n" +
-                "{\n" +
-                "    cout << \"hello, docker-java!\" << endl;\n" +
-                "    return 0;\n" +
-                "}\n" +
-                "\n";
+//        DockerSandbox sandbox = new DockerSandbox();
+        String cppCode = "#include <iostream>\n"
+                + "\n"
+                + "using namespace std;\n"
+                + "\n"
+                + "int main()\n"
+                + "{\n"
+                + "    int d[1024*1024*260];"
+                + "    cout << \"hello, docker-java!\" << endl;\n"
+                + "    return 0;\n"
+                + "}\n"
+                + "\n";
 
-        String javaCode = "public class Main {\n" +
-                "    public static void main(String[] args) {\n" +
-                "           System.out.print(\"success\");" +
-                "    }\n" +
-                "}";
-        String codePath = CommonUtils.saveCode("cpp", cppCode);
-        String containerId = sandbox.createContainer(codePath);
-        System.out.println(sandbox.execCmd(containerId, LanguageEnums.CPP.getCompileCmd(), 10000L, TimeUnit.MILLISECONDS));
-        System.out.println(sandbox.execCmd(containerId, LanguageEnums.CPP.getExecCmd(), 1000L, TimeUnit.MILLISECONDS));
-        CommonUtils.deleteFile(codePath);
+        String javaCode = "public class Main {\n"
+                + "    public static void main(String[] args)  throws Exception{\n"
+                + "int[] f = new int[1024 * 1024 * 256]; Thread.sleep(10000L);"
+                + "           System.out.print(\"success\");"
+                + "    }\n"
+                + "}";
+        String goCode = "package main\n"
+                + "\n"
+                + "import \"fmt\"\n"
+                + "\n"
+                + "func main() {\n"
+                + "    var arr[1024*1024]int\n"
+                + "    fmt.Println(arr)\n"
+                + "}";
+        String pyCode = "with open('a.txt', 'w') as f:\n" + "    f.write('这是写入到a.txt文件中的示例内容。')";
+//                String codePath = CommonUtils.saveCode("cpp", cppCode);
+//        String codePath = CommonUtils.saveCode(LanguageEnums.PYTHON3.getLanguage(), pyCode);
+//        String containerId = sandbox.createContainer(codePath);
+//        System.out.println(containerId);
+//        System.out.println(sandbox.execCmd(containerId, LanguageEnums.GO.getCompileCmd(), 10000L, TimeUnit.MILLISECONDS));
+//        System.out.println(sandbox.execCmd(containerId, LanguageEnums.PYTHON3.getExecCmd(), 1000L, TimeUnit.MILLISECONDS));
+//        CommonUtils.deleteFile(codePath);
     }
 }

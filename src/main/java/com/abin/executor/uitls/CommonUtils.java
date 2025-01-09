@@ -17,7 +17,7 @@ public class CommonUtils {
     private static final String GLOBAL_CODE_PATH = "code";
 
     /**
-     * 保存代码
+     * 保存代码，默认在 resource 下的 code 目录
      *
      * @param language 语言
      * @param code     代码
