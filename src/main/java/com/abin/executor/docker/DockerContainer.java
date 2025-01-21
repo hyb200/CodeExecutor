@@ -3,16 +3,17 @@ package com.abin.executor.docker;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
-import java.time.Duration;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-import lombok.Data;
+import jakarta.annotation.Resource;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
+import com.abin.executor.domain.CmdResult;
 import com.abin.executor.domain.ExecuteResp;
 import com.abin.executor.domain.enums.ExecStatusEnums;
 import com.github.dockerjava.api.DockerClient;
@@ -25,51 +26,34 @@ import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Statistics;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.api.model.Volume;
-import com.github.dockerjava.core.DefaultDockerClientConfig;
-import com.github.dockerjava.core.DockerClientConfig;
-import com.github.dockerjava.core.DockerClientImpl;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
-import com.github.dockerjava.transport.DockerHttpClient;
 
 @Slf4j
-@Data
-@Configuration
-@ConfigurationProperties(prefix = "sandbox.config")
-public class DockerSandbox {
+@Component
+public class DockerContainer {
 
-    private static final String DEFAULT_DOCKER_HOST = "unix:///var/run/docker.sock";
+    private static final String image = "compiler:2.0";
 
-    public static final String REMOTE_PATH = "/workspace";
+    private static final String REMOTE_PATH = "/workspace";
 
-    private String dockerHost;
+    @Value("${sandbox.config.memory-limit:268435456}")
+    private long memoryLimit;
 
-    private String image = "compiler:1.0";
+    @Value("${sandbox.config.cpu-count:1}")
+    private long cpuCount;
 
-    private long memoryLimit = 1024 * 1024 * 256;
+    @Value("${sandbox.config.memory-swap:0}")
+    private long memorySwap;
 
-    private long cpuCount = 1L;
+    @Resource
+    public DockerClient dockerClient;
 
-    private long memorySwap = 0L;
-
-    private final DockerClientConfig dockerClientConfig = DefaultDockerClientConfig.createDefaultConfigBuilder()
-            .withDockerHost(dockerHost == null ? DEFAULT_DOCKER_HOST : dockerHost)
-            .withDockerTlsVerify(false)
-            .build();
-
-    private final DockerHttpClient httpClient = new ApacheDockerHttpClient.Builder().dockerHost(dockerClientConfig.getDockerHost())
-            .maxConnections(100)
-            .connectionTimeout(Duration.ofSeconds(30))
-            .responseTimeout(Duration.ofSeconds(45))
-            .build();
-
-    private final DockerClient dockerClient = DockerClientImpl.getInstance(dockerClientConfig, httpClient);
-
-    public ExecuteResp execCmd(String containerId, String[] cmd, long timeoutLimit, TimeUnit timeUnit) {
+    public CmdResult execCmd(String containerId, String[] cmd, long timeoutLimit, TimeUnit timeUnit) {
         StatsCmd statsCmd = dockerClient.statsCmd(containerId);
 
-        final long[] memoryUsage = new long[1];
-        final long[] timeRecord = new long[2];
+        final long[] memory = new long[1];
+        final long[] time = new long[2];
 
+        CmdResult cmdResult = new CmdResult();
         ExecCreateCmdResponse createCmdResponse = dockerClient.execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdin(true)
@@ -77,26 +61,20 @@ public class DockerSandbox {
                 .withAttachStderr(true)
                 .exec();
 
-        final boolean[] result = { true };
-
-        ExecuteResp executeResp = new ExecuteResp();
-        executeResp.setExecStatusCode(ExecStatusEnums.SUCCESS.getCode());
-        executeResp.setExecResult(ExecStatusEnums.SUCCESS.getDesc());
-
         try (ByteArrayOutputStream out = new ByteArrayOutputStream();
             ByteArrayOutputStream err = new ByteArrayOutputStream();
-            ResultCallback<Statistics> statisticsResultCallback = new ResultCallback.Adapter<Statistics>() {
+            ResultCallback<Statistics> statisticsResultCallback = new ResultCallback.Adapter<>() {
                 @Override
                 public void onNext(Statistics statistics) {
-                    memoryUsage[0] = Math.max(memoryUsage[0], statistics.getMemoryStats().getUsage());
+                    memory[0] = Math.max(memory[0], statistics.getMemoryStats().getMaxUsage());
                 }
             };
-            ResultCallback.Adapter<Frame> frameAdapter = new ResultCallback.Adapter<Frame>() {
+            ResultCallback.Adapter<Frame> frameAdapter = new ResultCallback.Adapter<>() {
 
                 @Override
                 public void onStart(Closeable stream) {
                     statsCmd.exec(statisticsResultCallback);
-                    timeRecord[0] = System.currentTimeMillis();
+                    time[0] = System.currentTimeMillis();
                     super.onStart(stream);
                 }
 
@@ -105,7 +83,6 @@ public class DockerSandbox {
                 public void onNext(Frame frame) {
                     StreamType streamType = frame.getStreamType();
                     if (streamType.equals(StreamType.STDERR)) {
-                        result[0] = false;
                         err.write(frame.getPayload());
                     } else {
                         out.write(frame.getPayload());
@@ -115,52 +92,43 @@ public class DockerSandbox {
 
                 @Override
                 public void close() throws IOException {
+                    time[1] = System.currentTimeMillis();
                     statsCmd.close();
                     super.close();
                 }
             }) {
-            dockerClient.execStartCmd(createCmdResponse.getId()).exec(frameAdapter).awaitCompletion(timeoutLimit, timeUnit);
-            timeRecord[1] = System.currentTimeMillis();
 
-            executeResp.setErrMsg(err.toString());
-            executeResp.setOutput(out.toString());
+            boolean finish  = dockerClient.execStartCmd(createCmdResponse.getId()).exec(frameAdapter).awaitCompletion(timeoutLimit, timeUnit);
 
-            if (err.size() != 0) {
-                executeResp.setExecStatusCode(ExecStatusEnums.COMMON_ERROR.getCode());
-                executeResp.setExecResult(ExecStatusEnums.COMMON_ERROR.getDesc());
-                return executeResp;
+            if (!finish) {
+                cmdResult.setCode(ExecStatusEnums.TIME_LIMIT_EXCEEDED.getCode());
+                return cmdResult;
             }
 
-            long timeUsage = timeRecord[1] - timeRecord[0];
-            if (timeUsage > timeoutLimit) {
-                executeResp.setExecStatusCode(ExecStatusEnums.TIME_LIMIT_EXCEEDED.getCode());
-                executeResp.setExecResult(ExecStatusEnums.TIME_LIMIT_EXCEEDED.getDesc());
-                return executeResp;
-            }
+            cmdResult.setCode(ExecStatusEnums.SUCCESS.getCode()).setMessage(out.toString());
+            Optional.ofNullable(err.toString()).ifPresent(message -> {
+                cmdResult.setErrorMsg(message);
+                cmdResult.setCode(ExecStatusEnums.COMMON_ERROR.getCode());
+            });
 
-            if (memoryUsage[0] > memoryLimit) {
-                executeResp.setExecStatusCode(ExecStatusEnums.MEMORY_LIMIT_EXCEEDED.getCode());
-                executeResp.setExecResult(ExecStatusEnums.MEMORY_LIMIT_EXCEEDED.getDesc());
-                return executeResp;
-            }
-
-            executeResp.setTimeUsage(timeUsage);
-            executeResp.setMemoryUsage(memoryUsage[0]);
+            cmdResult.setTime(time[1] - time[0]);
+            cmdResult.setMemory(memory[0]);
+            return cmdResult;
         } catch (Exception e) {
-            log.error(e.getMessage());
+            log.error("exec cmd fail", e);
         }
-        return executeResp;
+        return cmdResult;
     }
 
-    public String createContainer(String codePath) {
+    public String create() {
         HostConfig hostConfig = new HostConfig();
-        hostConfig.setBinds(new Bind("/Users/abin/pjs/CodeExecutor/code", new Volume(REMOTE_PATH)));
+        hostConfig.setBinds(new Bind("./code", new Volume(REMOTE_PATH)));
         hostConfig.withMemorySwap(memorySwap);
         hostConfig.withMemory(memoryLimit);
         hostConfig.withCpuCount(cpuCount);
+        hostConfig.withReadonlyRootfs(true);
 
         String containerId = dockerClient.createContainerCmd(image).withHostConfig(hostConfig)
-                //                .withName("111") //  设置容器名
                 .withNetworkDisabled(true)  //  关闭网络
                 .withAttachStdin(true).withAttachStdout(true).withAttachStderr(true)
                 .withTty(true).exec().getId();

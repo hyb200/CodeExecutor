@@ -1,0 +1,23 @@
+FROM alpine:latest
+
+ENV LANG=C.UTF-8 \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk \
+    PATH=$PATH:/usr/lib/jvm/java-17-openjdk/bin
+
+RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories
+
+RUN apk add --no-cache \
+    build-base \
+    openjdk17-jre-headless \
+    python3 \
+    py3-pip \
+    go \
+    nodejs \
+    git \
+    bash
+
+# 设置工作目录
+WORKDIR /workspace
+
+# 默认进入工作目录
+CMD ["bash"]

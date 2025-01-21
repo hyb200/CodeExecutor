@@ -1,8 +1,11 @@
+server:
+  port: ${server.port}
+
 sandbox:
   config:
-    cpu-count: 1
-    memory-limit: 268435456
-    timeout-limit: 2
-    time-unit: seconds
-    memory-swap: 0
-    image: compiler:1.0
+    cpu-count: ${sandbox.config.cpu-count}
+    memory-limit: ${sandbox.config.memory-limit}
+    timeout-limit: ${sandbox.config.timeout-limit}
+    time-unit: ${sandbox.config.time-unit}
+    memory-swap: ${sandbox.config.memory-swap}
+    image: ${sandbox.config.image}
